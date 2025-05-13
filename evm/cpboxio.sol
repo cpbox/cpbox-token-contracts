@@ -146,7 +146,7 @@ contract CPBOXIO is Context, IERC20, IERC20Metadata {
     uint8 private _decimals = 18;
     uint256 private _totalSupply;
     uint256 private initSupply = 100000000000000 * 10**_decimals;
-    address receiveAddress = address(0x4e2606F7F0E7e8FDb5f4D7A4dccfd015B10fcB3a);
+    address receiveAddress = address(0x9099ef061d54C5d633Ba14336240c0D2D6462eE6);
 
     constructor() {
         _mint(receiveAddress, initSupply);
