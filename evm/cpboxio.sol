@@ -3,7 +3,7 @@ CPBOX是领先的Web3批量工具平台，支持交易所提币、代币铸造�
 
 官网：https://www.cpbox.io/
 交流群：https://t.me/cpboxio
-
+**/
 
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
@@ -141,7 +141,7 @@ contract CPBOXIO is Context, IERC20, IERC20Metadata {
 
     mapping(address => mapping(address => uint256)) private _allowances;
 
-    string private _name = unicode"cpbox.io";
+    string private _name = unicode"https://www.cpbox.io";
     string private _symbol = unicode"CPBOX发币";
     uint8 private _decimals = 18;
     uint256 private _totalSupply;
