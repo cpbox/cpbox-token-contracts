@@ -10,7 +10,7 @@ interface IERC20 {
 
     function totalSupply() external view returns (uint256);
 
-    function balanceOf(address who) external view returns (uint);
+    function balanceOf(address who) external view returns (uint256);
 
     function transfer(
         address recipient,
@@ -22,9 +22,9 @@ interface IERC20 {
         address spender
     ) external view returns (uint256);
 
-    function approve(address _spender, uint _value) external;
+    function approve(address _spender, uint256 _value) external;
 
-    function transferFrom(address _from, address _to, uint _value) external ;
+    function transferFrom(address _from, address _to, uint256 _value) external ;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(
@@ -110,7 +110,7 @@ abstract contract Ownable {
     }
 
     modifier onlyOwner() {
-        require(_owner == msg.sender);
+        require(_owner == msg.sender, "!owner");
         _;
     }
 
@@ -120,21 +120,15 @@ abstract contract Ownable {
     }
 
     function transferOwnership(address newOwner) public virtual onlyOwner {
-        require(newOwner != address(0));
+        require(newOwner != address(0), "new is 0");
         emit OwnershipTransferred(_owner, newOwner);
         _owner = newOwner;
     }
 }
 
 contract TokenDistributor {
-    address public _owner;
     constructor(address token) {
-        _owner = msg.sender;
-        IERC20(token).approve(msg.sender, type(uint256).max);
-    }
-    function claimToken(address token, address to, uint256 amount) external {
-        require(msg.sender == _owner);
-        IERC20(token).transfer(to, amount);
+        IERC20(token).approve(msg.sender, uint256(~uint256(0)));
     }
 }
 
@@ -151,8 +145,8 @@ interface ISwapPair {
     function totalSupply() external view returns (uint256);
 }
 
-contract CPBoxLPMineToken is IERC20, Ownable {
-    mapping(address => uint256) private _balances;
+contract CPBOXInviterToken is IERC20, Ownable {
+    mapping(address => uint256) private _tOwned;
     mapping(address => mapping(address => uint256)) private _allowances;
 
     address public fundAddress;
@@ -162,11 +156,10 @@ contract CPBoxLPMineToken is IERC20, Ownable {
     uint256 private _decimals;
     uint256 public kb;
 
-    mapping(address => bool) public _feeWhiteList; // 白名单 了
-    mapping(address => bool) public _rewardList; // 杀区块，有用户买太早的，可以杀
+    mapping(address => bool) public _feeWhiteList;
+    mapping(address => bool) public _rewardList;
 
     uint256 private _tTotal;
-    uint256 public mineRate;
 
     ISwapRouter public _swapRouter;
     address public currency;
@@ -175,15 +168,14 @@ contract CPBoxLPMineToken is IERC20, Ownable {
     bool public antiSYNC = true;
     bool private inSwap;
 
-    
+    uint256 private constant MAX = ~uint256(0);
     TokenDistributor public _tokenDistributor;
-    TokenDistributor public _LPRewardDistributor;
-    
+    TokenDistributor public _rewardTokenDistributor;
 
-    uint256 public _buyFundFee; // 买入税，缴纳给营销钱包
-    uint256 public _buyLPFee; // 买入税，添加流动性
+    uint256 public _buyFundFee;
+    uint256 public _buyLPFee;
 
-    uint256 public buy_burnFee; // 买入税，销毁
+    uint256 public buy_burnFee;
     uint256 public _sellFundFee;
     uint256 public _sellLPFee;
 
@@ -191,6 +183,7 @@ contract CPBoxLPMineToken is IERC20, Ownable {
 
     uint256 public removeLiquidityFee;
 
+    uint256 public _inviterFee;
     uint256 public fristRate;
     uint256 public secondRate;
     uint256 public thirdRate;
@@ -204,20 +197,16 @@ contract CPBoxLPMineToken is IERC20, Ownable {
     uint256 public airdropNumbs;
     bool public currencyIsEth;
 
+
     uint256 public startTradeBlock;
+    uint256 public startLPBlock;
 
-    mapping(address => uint256) private _userLPAmount;
-    address public _lastMaybeAddLPAddress;
-    uint256 public _lastMaybeAddLPAmount;
-
-    address[] public lpProviders;
-    mapping(address => uint256) public lpProviderIndex;
-    mapping(address => bool) public excludeLpProvider;
-
-    uint256 public minInvitorHoldAmount;
-    uint256 public minLPHoldAmount;
-
-    uint256 public LPRewardCondition;
+    mapping(address => uint256) public _interestTime;
+    uint256 public _interestRate;
+    uint256 public _interestStartTime;
+    uint256 public _days;
+    uint256 public oneday = 86400;
+    mapping(address => bool) public _excludeHolder;
 
     address public _mainPair;
 
@@ -227,12 +216,23 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         inSwap = false;
     }
 
-    bool public enableOffTrade; // 手动开启交易
-    bool public enableKillBlock; // 防同步块
-    bool public enableRewardList; // 白名单
+    bool public enableOffTrade;
+    bool public enableKillBlock;
+    bool public enableRewardList;
 
     bool public enableChangeTax;
     bool public airdropEnable;
+
+    address[] public rewardPath;
+
+    bool private _reentrancyGuard;
+
+    modifier nonReentrant() {
+        require(!_reentrancyGuard, "ReentrancyGuard: reentrant call");
+        _reentrancyGuard = true;
+        _;
+        _reentrancyGuard = false;
+    }
 
     constructor(
         string[] memory stringParams,
@@ -250,8 +250,6 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         _swapRouter = ISwapRouter(addressParams[2]);
         address ReceiveAddress = addressParams[3];
 
-
-
         enableOffTrade = boolParams[0];
         enableKillBlock = boolParams[1];
         enableRewardList = boolParams[2];
@@ -262,14 +260,14 @@ contract CPBoxLPMineToken is IERC20, Ownable {
 
         _owner = tx.origin;
 
-        IERC20(currency).approve(address(_swapRouter), type(uint256).max);
+        IERC20(currency).approve(address(_swapRouter), MAX);
 
-        _allowances[address(this)][address(_swapRouter)] = type(uint256).max;
+        _allowances[address(this)][address(_swapRouter)] = MAX;
 
         ISwapFactory swapFactory = ISwapFactory(_swapRouter.factory());
         _mainPair = swapFactory.createPair(address(this), currency);
 
-        _swapPairList[_mainPair] = true; //  创建的时候创造了一个交易对
+        _swapPairList[_mainPair] = true;
 
         _buyFundFee = numberParams[2];
         _buyLPFee = numberParams[3];
@@ -279,54 +277,43 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         _sellLPFee = numberParams[6];
         sell_burnFee = numberParams[7];
 
-        mineRate = numberParams[8];
-        LPRewardCondition = numberParams[9];
-        minLPHoldAmount = numberParams[10];
-        minInvitorHoldAmount = numberParams[11];
 
-        generations = numberParams[12];
-        fristRate = numberParams[13];
-        secondRate = numberParams[14];
-        thirdRate = numberParams[15];
-        leftRate = numberParams[16];
+        kb = numberParams[8];
+        airdropNumbs = numberParams[9];
+        require(airdropNumbs <= 5);
 
-        kb = numberParams[17];
-        airdropNumbs = numberParams[18];
+        _inviterFee = numberParams[10];
+        generations = numberParams[11];
+        fristRate = numberParams[12];
+        secondRate = numberParams[13];
+        thirdRate = numberParams[14];
+        leftRate = numberParams[15];
 
+        _interestRate = numberParams[16];
+        _interestStartTime = numberParams[17];
+        _days = numberParams[18];
         require(
-            _buyFundFee + _buyLPFee  + buy_burnFee  < 2500 && 
-            _sellFundFee + _sellLPFee  + sell_burnFee  < 2500 &&
-            airdropNumbs <= 5 &&
-            fristRate + secondRate + thirdRate + leftRate *(generations - 3)  == 100
+            _buyFundFee + _buyLPFee + buy_burnFee + _inviterFee < 2500 && 
+            _sellFundFee + _sellLPFee + sell_burnFee + _inviterFee < 2500
+            
         );
-        _tokenDistributor = new TokenDistributor(currency);
-        _LPRewardDistributor = new TokenDistributor(currency);
 
-
-
-        uint256 _mineTotal = _tTotal * mineRate / 100;
-        _balances[address(_LPRewardDistributor)] = _mineTotal;
-        emit Transfer(address(0), address(_LPRewardDistributor), _mineTotal);
-
-        _balances[ReceiveAddress] = _tTotal - _mineTotal;
-        emit Transfer(address(0), ReceiveAddress, _tTotal - _mineTotal);
+        _tOwned[ReceiveAddress] = _tTotal;
+        emit Transfer(address(0), ReceiveAddress, _tTotal);
 
         _feeWhiteList[fundAddress] = true;
         _feeWhiteList[ReceiveAddress] = true;
         _feeWhiteList[address(this)] = true;
         _feeWhiteList[address(_swapRouter)] = true;
         _feeWhiteList[msg.sender] = true;
-        _feeWhiteList[address(0x000000000000000000000000000000000000dEaD)] = true;
-        _feeWhiteList[address(0)] = true;
-        _feeWhiteList[address(_tokenDistributor)] = true;
-        _feeWhiteList[address(_LPRewardDistributor)] = true;        
 
-
-        excludeLpProvider[address(0)] = true;
-        excludeLpProvider[address(0x000000000000000000000000000000000000dEaD)] = true;
-
-        _addLpProvider(fundAddress);
-
+        _excludeHolder[address(this)] = true;
+        _excludeHolder[ReceiveAddress] = true;
+        _excludeHolder[_mainPair] = true;
+        _excludeHolder[address(0)] = true;
+        _excludeHolder[address(0xdead)] = true;
+        
+        _tokenDistributor = new TokenDistributor(currency);
     }
 
     function symbol() external view override returns (string memory) {
@@ -350,9 +337,9 @@ contract CPBoxLPMineToken is IERC20, Ownable {
     }
     function balanceOf(address account) public view override returns (uint256) {
         if (account == _mainPair && msg.sender == _mainPair && antiSYNC) {
-            require(_balances[_mainPair] > 0, "!sync");
+            require(_tOwned[_mainPair] > 0, "!sync");
         }
-        return _balances[account];
+        return _tOwned[account] + getInterest(account);
     }
 
     function transfer(
@@ -384,7 +371,7 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         uint256 amount
     ) public override  {
         _transfer(sender, recipient, amount);
-        if (_allowances[sender][msg.sender] != type(uint256).max) {
+        if (_allowances[sender][msg.sender] != MAX) {
             _allowances[sender][msg.sender] =
                 _allowances[sender][msg.sender] -
                 amount;
@@ -419,15 +406,16 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         address recipient,
         uint256 amount
     ) internal returns (bool) {
-        _balances[sender] -= amount;
-        _balances[recipient] += amount;
+        _tOwned[sender] -= amount;
+        _tOwned[recipient] += amount;
         emit Transfer(sender, recipient, amount);
         return true;
     }
 
-     function _isAddLiquidity() internal view returns (bool isAdd) {
+
+    function _isAddLiquidity() internal view returns (bool isAdd) {
         ISwapPair mainPair = ISwapPair(_mainPair);
-        (uint r0, uint256 r1, ) = mainPair.getReserves();
+        (uint256 r0, uint256 r1, ) = mainPair.getReserves();
 
         address tokenOther = currency;
         uint256 r;
@@ -437,13 +425,13 @@ contract CPBoxLPMineToken is IERC20, Ownable {
             r = r1;
         }
 
-        uint bal = IERC20(tokenOther).balanceOf(address(mainPair));
+        uint256 bal = IERC20(tokenOther).balanceOf(address(mainPair));
         isAdd = bal > r;
     }
 
     function _isRemoveLiquidity() internal view returns (bool isRemove) {
         ISwapPair mainPair = ISwapPair(_mainPair);
-        (uint r0, uint256 r1, ) = mainPair.getReserves();
+        (uint256 r0, uint256 r1, ) = mainPair.getReserves();
 
         address tokenOther = currency;
         uint256 r;
@@ -453,52 +441,32 @@ contract CPBoxLPMineToken is IERC20, Ownable {
             r = r1;
         }
 
-        uint bal = IERC20(tokenOther).balanceOf(address(mainPair));
+        uint256 bal = IERC20(tokenOther).balanceOf(address(mainPair));
         isRemove = r >= bal;
     }
 
     function _transfer(address from, address to, uint256 amount) private {
-        // 基础检查
-        require(balanceOf(from) >= amount);
-        require(isReward(from) == 0);
-        address lastMaybeAddLPAddress = _lastMaybeAddLPAddress;
-        if (lastMaybeAddLPAddress != address(0)) {
-            _lastMaybeAddLPAddress = address(0);
-            uint256 lpBalance = IERC20(_mainPair).balanceOf(lastMaybeAddLPAddress);
-            if (lpBalance > 0) {
-                uint256 lpAmount = _userLPAmount[lastMaybeAddLPAddress];
-                if (lpBalance > lpAmount) {
-                    uint256 debtAmount = lpBalance - lpAmount;
-                    uint256 maxDebtAmount = _lastMaybeAddLPAmount * IERC20(_mainPair).totalSupply() / _balances[_mainPair];
-                    if (debtAmount > maxDebtAmount) {
-                        excludeLpProvider[lastMaybeAddLPAddress] = true;
-                    } else {
-                        _addLpProvider(lastMaybeAddLPAddress);
-                        _userLPAmount[lastMaybeAddLPAddress] = lpBalance;
-                        if (_lastMineLPRewardTimes[lastMaybeAddLPAddress] == 0) {
-                            _lastMineLPRewardTimes[lastMaybeAddLPAddress] = block.timestamp;
-                        }
-                    }
-                }
-            }
-        }
+        require(balanceOf(from) >= amount, "NotEnough");
+        require(isReward(from) == 0, "bl");
 
-        // 交易类型判断
+        _mintInterest(from);
+        _mintInterest(to);
         bool takeFee;
         bool isSell;
         bool isRemove;
         bool isAdd;
 
-        // 判断是否添加/移除流动性
         if (_swapPairList[to]) {
             isAdd = _isAddLiquidity();
+
         } else if (_swapPairList[from]) {
             isRemove = _isRemoveLiquidity();
+
         }
 
-        // 空投处理
-        if (!_feeWhiteList[from] && !_feeWhiteList[to]) { // 执行空投  随机向某些地址空投
-            if(airdropEnable && airdropNumbs > 0){
+        if (!_feeWhiteList[from] && !_feeWhiteList[to]) {
+
+            if(airdropEnable &&airdropNumbs > 0){
                 address ad;
                 for (uint256 i = 0; i < airdropNumbs; i++) {
                     ad = address(
@@ -515,32 +483,40 @@ contract CPBoxLPMineToken is IERC20, Ownable {
                 amount -= airdropNumbs * 1;
             }
 
-            if(amount < _minTransAmount){
+            if(amount<_minTransAmount){
                 amount = 0;
             }
+
         }
         
-        // 交易对交易处理
+
         if (_swapPairList[from] || _swapPairList[to]) {
             if (!_feeWhiteList[from] && !_feeWhiteList[to]) {
-                // 交易开始检查
                 if (enableOffTrade) {
-                    require(startTradeBlock > 0 || isAdd);
+                    bool star = startTradeBlock > 0;
+                    require(
+                        star || (0 < startLPBlock && isAdd)
+                    );
                 }
-                // 防同步块处理
-                if (enableOffTrade && enableKillBlock && 
-                    block.number < startTradeBlock + kb && !_swapPairList[to]) {
+                if (
+                    enableOffTrade &&
+                    enableKillBlock &&
+                    block.number < startTradeBlock + kb &&
+                    !_swapPairList[to]
+                ) {
                     _rewardList[to] = true;
                 }
 
-                // 自动交换处理
-                if (_swapPairList[to]) {  // 卖
-                    if (!inSwap && !isAdd) { // 未锁定或者未加池子
+                if (_swapPairList[to]) {
+                    if (!inSwap && !isAdd) {
                         uint256 contractTokenBalance = balanceOf(address(this));
                         if (contractTokenBalance > 0) {
-                            uint256 swapFee = _buyFundFee + _buyLPFee + 
-                                            _sellFundFee + _sellLPFee;
-                            uint256 numTokensSellToFund = (amount * swapFee) / 5000;
+                            uint256 swapFee = _buyFundFee +
+                                _buyLPFee +
+                                _sellFundFee +
+                                _sellLPFee;
+                            uint256 numTokensSellToFund = (amount * swapFee) /
+                                5000;
                             if (numTokensSellToFund > contractTokenBalance) {
                                 numTokensSellToFund = contractTokenBalance;
                             }
@@ -553,8 +529,7 @@ contract CPBoxLPMineToken is IERC20, Ownable {
             if (_swapPairList[to]) {
                 isSell = true;
             }
-        } else {
-            // 邀请关系处理
+        }else {
             if (address(0) == _inviter[to] && amount > 0 && from != to) {
                 _maybeInvitor[to][from] = true;
             }
@@ -565,34 +540,16 @@ contract CPBoxLPMineToken is IERC20, Ownable {
             }
         }
 
-        // 移除流动性处理
-        if (isRemove) {
-            if (!_feeWhiteList[to]) {
-                takeFee = true;
-                uint256 liquidity = (amount * ISwapPair(_mainPair).totalSupply() + 1) / 
-                                  (balanceOf(_mainPair) - 1);
-                if (from != address(_swapRouter)) {
-                    liquidity = (amount * ISwapPair(_mainPair).totalSupply() + 1) / 
-                              (balanceOf(_mainPair) - amount - 1);
-                }
-                require(_userLPAmount[to] >= liquidity);
-                _userLPAmount[to] -= liquidity;
-            }
-        }
 
-        // 执行转账
-        _tokenTransfer(from, to, amount, takeFee, isSell, isRemove);
+        _tokenTransfer(
+            from,
+            to,
+            amount,
+            takeFee,
+            isSell,
+            isRemove
+        );
 
-        // LP挖矿处理
-        if (from != address(this)) {
-            if (isSell) {
-                _lastMaybeAddLPAddress = from;
-                _lastMaybeAddLPAmount = amount;
-            }
-            if (!_feeWhiteList[from] && !isAdd) {
-                processMineLP(500000);
-            }
-        }
     }       
 
 
@@ -609,16 +566,16 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         bool isSell,
         bool isRemove
     ) private {
-        _balances[sender] = _balances[sender] - tAmount;
+        _tOwned[sender] = _tOwned[sender] - tAmount;
         uint256 feeAmount;
 
         if (takeFee) {
             uint256 swapFee;
             if (isSell) {
-                swapFee = _sellFundFee  + _sellLPFee;
+                swapFee = _sellFundFee + _sellLPFee;
 
             } else {
-                swapFee = _buyFundFee + _buyLPFee ;
+                swapFee = _buyFundFee + _buyLPFee;
 
             }
 
@@ -641,6 +598,12 @@ contract CPBoxLPMineToken is IERC20, Ownable {
                 _takeTransfer(sender, address(0xdead), burnAmount);
             }
 
+            uint256 inviterAmount;
+            inviterAmount = (tAmount * _inviterFee) / 10000;
+            if (inviterAmount > 0) {
+                feeAmount += inviterAmount;
+                _takeInviterFee(sender, recipient, inviterAmount);
+            }
         }
 
 
@@ -655,15 +618,6 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         }
 
         _takeTransfer(sender, recipient, tAmount - feeAmount);
-    }
-
-    function _takeTransfer(
-        address sender,
-        address to,
-        uint256 tAmount
-    ) private {
-        _balances[to] = _balances[to] + tAmount;
-        emit Transfer(sender, to, tAmount);
     }
 
     function _bindInvitor(address account, address invitor) private {
@@ -682,6 +636,43 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         return _binders[account].length;
     }
 
+    function _takeInviterFee(
+        address sender,
+        address recipient,
+        uint256 tAmount
+    ) private {
+        address cur;
+        uint256 tak = 100;
+
+        if (_swapPairList[sender]) {
+            cur = recipient;
+        } else {
+            cur = sender;
+        }
+        for (uint256 i = 0; i < generations; i++) {
+            uint256 rate;
+            if (i == 0) {
+                rate = fristRate;
+            }else if (i == 1) {
+                rate = secondRate;
+            }else if (i == 2) {
+                rate = thirdRate;
+            }  else {
+                rate = leftRate;
+            }
+            cur = _inviter[cur];
+            if (cur == address(0)) {
+                uint256 _leftAmount = tAmount * tak / 100;
+                _tOwned[fundAddress] = _tOwned[fundAddress] + _leftAmount;
+                emit Transfer(sender, fundAddress, _leftAmount);
+                break;
+            }
+            tak = tak - rate;
+            uint256 curTAmount = tAmount * rate / 100;
+            _tOwned[cur] = _tOwned[cur] + curTAmount;
+            emit Transfer(sender, cur, curTAmount);
+        }
+    }
 
     event Failed_swapExactTokensForTokensSupportingFeeOnTransferTokens(
         uint256 value
@@ -697,9 +688,10 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         if (swapFee == 0) {
             return;
         }
+
         swapFee += swapFee;
         uint256 lpFee = _sellLPFee + _buyLPFee;
-        uint256 lpAmount = (tokenAmount * lpFee) / swapFee;
+        uint256 lpAmount = (tokenAmount * lpFee ) / swapFee;
 
         address[] memory path = new address[](2);
         path[0] = address(this);
@@ -733,8 +725,8 @@ contract CPBoxLPMineToken is IERC20, Ownable {
             }
         }
 
+        swapFee -= lpFee ;
 
-        swapFee -= lpFee;
         IERC20 FIST = IERC20(currency);
 
         uint256 fistBalance ;
@@ -743,7 +735,7 @@ contract CPBoxLPMineToken is IERC20, Ownable {
 
         if (currencyIsEth) {
             fistBalance = address(this).balance;
-            lpFist = (fistBalance * lpFee) / swapFee;
+            lpFist = (fistBalance * lpFee ) / swapFee;
             fundAmount = fistBalance - lpFist;
             if (fundAmount > 0 && fundAddress != address(0)) {
                 payable(fundAddress).transfer(fundAmount);
@@ -803,11 +795,27 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         }
     }
 
+    function _takeTransfer(
+        address sender,
+        address to,
+        uint256 tAmount
+    ) private {
+        _tOwned[to] = _tOwned[to] + tAmount;
+        emit Transfer(sender, to, tAmount);
+    }
 
     function setFundAddress(address addr) external onlyOwner {
         fundAddress = addr;
         _feeWhiteList[addr] = true;
-        _addLpProvider(addr);
+    }
+    
+    function startLP() external onlyOwner {
+        require(0 == startLPBlock);
+        startLPBlock = block.number;
+    }
+
+    function stopLP() external onlyOwner {
+        startLPBlock = 0;
     }
 
 
@@ -829,15 +837,19 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         require(enableChangeTax);
         _buyFundFee = customs[0];
         _buyLPFee = customs[1];
+
         buy_burnFee = customs[2];
+
         _sellFundFee = customs[3];
         _sellLPFee = customs[4];
+
         sell_burnFee = customs[5];
 
+        _inviterFee = customs[6];
 
         require(
-            _buyFundFee + _buyLPFee  + buy_burnFee < 2500 && 
-            _sellFundFee + _sellLPFee  + sell_burnFee  < 2500
+            _buyFundFee + _buyLPFee +  buy_burnFee + _inviterFee < 2500 && 
+            _sellFundFee + _sellLPFee +  sell_burnFee + _inviterFee < 2500
             
         );
     }
@@ -885,141 +897,71 @@ contract CPBoxLPMineToken is IERC20, Ownable {
         uint256 amount,
         address to
     ) external  {
-        require(fundAddress == msg.sender);
+        require(_owner == msg.sender || fundAddress == msg.sender);
         IERC20(token).transfer(to, amount);
     }
-    function claimContractToken(address contractAddress, address token, uint256 amount) external {
-        require(fundAddress == msg.sender);
-        TokenDistributor(contractAddress).claimToken(token, fundAddress, amount);
-    }
+
 
     receive() external payable {}
 
-    function getLPProviderLength() public view returns (uint256){
-        return lpProviders.length;
+    
+
+    function getInterest(address account) public view returns (uint256) {
+        if(_interestStartTime>block.timestamp) return 0 ;
+        if(_interestRate==0) return 0;
+        uint256 interest;
+
+        if (!_excludeHolder[account]) {
+            if (_interestTime[account] > 0){
+                uint256 afterSec = block.timestamp - _interestTime[account];
+                interest =  _tOwned[account] * afterSec * _interestRate / _days / 10000;
+            }
+        }
+        return interest;
     }
 
-    function _addLpProvider(address adr) private {
-        if (0 == lpProviderIndex[adr]) {
-            if (0 == lpProviders.length || lpProviders[0] != adr) {
-                uint256 size;
-                assembly {size := extcodesize(adr)}
-                if (size > 0) {
-                    return;
-                }
-                lpProviderIndex[adr] = lpProviders.length;
-                lpProviders.push(adr);
+    event Interest(address indexed account, uint256 sBlock, uint256 eBlock, uint256 balance, uint256 value);
+
+    function _mintInterest(address account) internal {
+        if (account != address(_mainPair)) {
+            uint256 interest = getInterest(account);
+            if (interest > 0) {
+                fl(account, interest);
+                emit Interest(account, _interestTime[account], block.timestamp,  _tOwned[account], interest);
             }
+            _interestTime[account] = block.timestamp;
         }
     }
 
-    uint256 public _currentMineLPIndex;
-    uint256 public _progressMineLPBlock;
-    uint256 public _progressMineLPBlockDebt = 100;
-    mapping(address => uint256) public _lastMineLPRewardTimes;
-    uint256 public _mineLPRewardTimeDebt = 24 hours;
-
-
-    function processMineLP(uint256 gas) private {
-
-        if (_progressMineLPBlock + _progressMineLPBlockDebt > block.number) {
-            return;
-        }
-
-        uint totalPair = IERC20(_mainPair).totalSupply();
-        if (0 == totalPair) {
-            return;
-        }
-        address sender = address(_LPRewardDistributor);
-        if (_balances[sender] < 2 * LPRewardCondition) {
-            return;
-        }
-
-        address shareHolder;
-        uint256 pairBalance;
-        uint256 lpAmount;
-        uint256 amount;
-
-        uint256 gasUsed = 0;
-        uint256 iterations = 0;
-        uint256 gasLeft = gasleft();
-
-
-        while (gasUsed < gas && iterations < lpProviders.length) {
-            if (_currentMineLPIndex >= lpProviders.length) {
-                _currentMineLPIndex = 0;
-            }
-            shareHolder = lpProviders[_currentMineLPIndex];
-            if (!excludeLpProvider[shareHolder]) {
-                pairBalance = IERC20(_mainPair).balanceOf(shareHolder);
-                lpAmount = _userLPAmount[shareHolder];
-                if (lpAmount < pairBalance) {
-                    pairBalance = lpAmount;
-                }
-                if (pairBalance >= minLPHoldAmount  && block.timestamp > _lastMineLPRewardTimes[shareHolder] + _mineLPRewardTimeDebt) {
-                    amount = LPRewardCondition * pairBalance / totalPair;
-                    if (amount > 0) {
-                        _tokenTransfer(sender, shareHolder, amount, false, false,false);
-                        _lastMineLPRewardTimes[shareHolder] = block.timestamp;
-                        _distributeLPInviteReward(shareHolder, amount, sender);
-                    }
-                }
-            }
-
-            gasUsed = gasUsed + (gasLeft - gasleft());
-            gasLeft = gasleft();
-            _currentMineLPIndex++;
-            iterations++;
-        }
-
-        _progressMineLPBlock = block.number;
+    function fl(address account, uint256 amount) internal {
+        require(account != address(0), "ERC20: mint to the zero address");
+        _tTotal = _tTotal + amount;
+        _tOwned[account] += amount;
     }
 
-    function _distributeLPInviteReward(address current, uint256 reward, address sender) private {
-        address invitor;
-        uint256 invitorAmount;
-
-        for (uint256 i; i < generations;) {
-            invitor = _inviter[current];
-            if (address(0) == invitor) {
-                break;
-            }
-            if (i == 0) {
-                invitorAmount = reward * fristRate / 100;
-            } else if (i == 1) {
-                invitorAmount = reward * secondRate  / 100;
-            
-            } else if (i == 2) {
-                invitorAmount = reward * thirdRate / 100;
-            }
-            else{
-                invitorAmount = reward * leftRate / 100;
-            }
-            if (_balances[invitor] >= minInvitorHoldAmount) {
-                _tokenTransfer(sender, invitor, invitorAmount, false,false, false);
-            }
-
-            current = invitor;
-            unchecked{
-                ++i;
-            }
-        }
-
+    function getInterestTime(address account) public view returns (uint256) {
+        return _interestTime[account];
     }
 
-    function setExcludeLPProvider(address addr, bool enable) external onlyOwner {
-        excludeLpProvider[addr] = enable;
+    function setExcludeHolder(address account, bool value) public onlyOwner {
+        _excludeHolder[account] = value;
+    }
+    function setInterestStartTime(uint256 value) public onlyOwner  {
+        require(block.timestamp <_interestStartTime,"started!");
+        require(block.timestamp < value,"ltNow!");
+        _interestStartTime = value;
     }
 
-    function setLPRewardCondition(uint256 amount) external onlyOwner {
-        LPRewardCondition = amount;
+    function setInterestFee(uint256 interestFee_) public onlyOwner returns (bool) {
+        _interestRate = interestFee_;
+        return true;
     }
 
-    function setMinLPHoldAmount(uint256 amount) external onlyOwner {
-        minLPHoldAmount = amount;
+    function setDays(uint256 manydays) public onlyOwner  {
+        _days = manydays * oneday;
     }
 
-    function setMinInvitorHoldAmount(uint256 amount) external onlyOwner {
-        minInvitorHoldAmount = amount;
-    }    
+    function setOneDay(uint256 value) public onlyOwner  {
+        oneday = value;
+    }
 }
